@@ -1,3 +1,8 @@
+'''
+输出在outputs/
+python scripts/txt2img.py --prompt "a photograph of an astronaut riding a horse" --ckpt ckpt/v1-5-pruned.ckpt
+'''
+
 import argparse, os, sys, glob
 import cv2
 import torch

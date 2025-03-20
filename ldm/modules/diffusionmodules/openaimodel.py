@@ -215,7 +215,7 @@ class ResBlock(TimestepBlock):
         else:
             self.h_upd = self.x_upd = nn.Identity()
 
-        self.emb_layers = nn.Sequential(
+        self.emb_layers = nn.Sequential(  # t的位置编码维度调整，为了和in_layers输出能相加
             nn.SiLU(),
             linear(
                 emb_channels,
@@ -231,6 +231,7 @@ class ResBlock(TimestepBlock):
             ),
         )
 
+        # 残差模块，如果输出通道和输入相同，直接相加；否则用conv来调整维度
         if self.out_channels == channels:
             self.skip_connection = nn.Identity()
         elif use_conv:
@@ -261,17 +262,21 @@ class ResBlock(TimestepBlock):
             h = in_conv(h)
         else:
             h = self.in_layers(x)
-        emb_out = self.emb_layers(emb).type(h.dtype)
+        
+        # 调整t维度
+        emb_out = self.emb_layers(emb).type(h.dtype)  
         while len(emb_out.shape) < len(h.shape):
             emb_out = emb_out[..., None]
+
         if self.use_scale_shift_norm:
             out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
             scale, shift = th.chunk(emb_out, 2, dim=1)
             h = out_norm(h) * (1 + scale) + shift
             h = out_rest(h)
         else:
-            h = h + emb_out
+            h = h + emb_out  # h的形状是(b,c,h,w)，emb_out形状是(b,c)，相加时后者会自动广播成(b,c,h,w)，加到h每个位置上
             h = self.out_layers(h)
+        
         return self.skip_connection(x) + h
 
 
@@ -513,6 +518,7 @@ class UNetModel(nn.Module):
         if self.num_classes is not None:
             self.label_emb = nn.Embedding(num_classes, time_embed_dim)
 
+        # 调整输入图片通道数的卷积层
         self.input_blocks = nn.ModuleList(
             [
                 TimestepEmbedSequential(
@@ -524,8 +530,8 @@ class UNetModel(nn.Module):
         input_block_chans = [model_channels]
         ch = model_channels
         ds = 1
-        for level, mult in enumerate(channel_mult):
-            for _ in range(num_res_blocks):
+        for level, mult in enumerate(channel_mult):  # 4个大层，channel_mult=[1, 2, 4, 4]，表示该层输出的通道数是几倍
+            for _ in range(num_res_blocks):  # 每个大层都有2个下面的模块
                 layers = [
                     ResBlock(
                         ch,
@@ -554,14 +560,14 @@ class UNetModel(nn.Module):
                             num_heads=num_heads,
                             num_head_channels=dim_head,
                             use_new_attention_order=use_new_attention_order,
-                        ) if not use_spatial_transformer else SpatialTransformer(
+                        ) if not use_spatial_transformer else SpatialTransformer(  # AttentionBlock是DDPM里的普通注意力模块，SpatialTransformer是LDM的支持约束的注意力模块
                             ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim
                         )
                     )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
                 self._feature_size += ch
                 input_block_chans.append(ch)
-            if level != len(channel_mult) - 1:
+            if level != len(channel_mult) - 1:  # 如果不是最后一个大层，添加下采样模块
                 out_ch = ch
                 self.input_blocks.append(
                     TimestepEmbedSequential(
@@ -679,7 +685,7 @@ class UNetModel(nn.Module):
                 self.output_blocks.append(TimestepEmbedSequential(*layers))
                 self._feature_size += ch
 
-        self.out = nn.Sequential(
+        self.out = nn.Sequential(  # 改变最后输出的通道，在这套代码里SD输出应该是4通道
             normalization(ch),
             nn.SiLU(),
             zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
@@ -712,7 +718,7 @@ class UNetModel(nn.Module):
         Apply the model to an input batch.
         :param x: an [N x C x ...] Tensor of inputs.
         :param timesteps: a 1-D batch of timesteps.
-        :param context: conditioning plugged in via crossattn
+        :param context: conditioning plugged in via crossattn  # CLIP编码后的文本约束
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
@@ -720,26 +726,29 @@ class UNetModel(nn.Module):
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
         hs = []
-        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
-        emb = self.time_embed(t_emb)
+
+        # 对t位置编码
+        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)  # 位置编码
+        emb = self.time_embed(t_emb)  # 过几个线性层，得到最终的t编码
 
         if self.num_classes is not None:
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
-
+        
+        # U-Net forward
         h = x.type(self.dtype)
-        for module in self.input_blocks:
+        for module in self.input_blocks:  # 下采样模块，是左边那几个
             h = module(h, emb, context)
             hs.append(h)
         h = self.middle_block(h, emb, context)
-        for module in self.output_blocks:
+        for module in self.output_blocks:  # 右边的上采样模块
             h = th.cat([h, hs.pop()], dim=1)
             h = module(h, emb, context)
         h = h.type(x.dtype)
         if self.predict_codebook_ids:
             return self.id_predictor(h)
         else:
-            return self.out(h)
+            return self.out(h)  # 转换为通道数正确的eps
 
 
 class EncoderUNetModel(nn.Module):

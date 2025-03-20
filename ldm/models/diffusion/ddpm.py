@@ -421,7 +421,7 @@ class DDPM(pl.LightningModule):
         return opt
 
 
-class LatentDiffusion(DDPM):
+class LatentDiffusion(DDPM):  # 主要维护扩散模型中间变量、U-Net、VAE、CLIP
     """main class"""
     def __init__(self,
                  first_stage_config,
@@ -498,14 +498,14 @@ class LatentDiffusion(DDPM):
         self.shorten_cond_schedule = self.num_timesteps_cond > 1
         if self.shorten_cond_schedule:
             self.make_cond_schedule()
-
+    # VAE
     def instantiate_first_stage(self, config):
         model = instantiate_from_config(config)
         self.first_stage_model = model.eval()
         self.first_stage_model.train = disabled_train
         for param in self.first_stage_model.parameters():
             param.requires_grad = False
-
+    # CLIP
     def instantiate_cond_stage(self, config):
         if not self.cond_stage_trainable:
             if config == "__is_first_stage__":
@@ -889,6 +889,7 @@ class LatentDiffusion(DDPM):
         return [rescale_bbox(b) for b in bboxes]
 
     def apply_model(self, x_noisy, t, cond, return_ids=False):
+        print()
 
         if isinstance(cond, dict):
             # hybrid case, cond is exptected to be a dict
@@ -896,7 +897,7 @@ class LatentDiffusion(DDPM):
         else:
             if not isinstance(cond, list):
                 cond = [cond]
-            key = 'c_concat' if self.model.conditioning_key == 'concat' else 'c_crossattn'
+            key = 'c_concat' if self.model.conditioning_key == 'concat' else 'c_crossattn'  # 约束和输入拼接/将约束注入attention
             cond = {key: cond}
 
         if hasattr(self, "split_input_params"):
@@ -914,8 +915,8 @@ class LatentDiffusion(DDPM):
             z = z.view((z.shape[0], -1, ks[0], ks[1], z.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
             z_list = [z[:, :, :, :, i] for i in range(z.shape[-1])]
 
-            if self.cond_stage_key in ["image", "LR_image", "segmentation",
-                                       'bbox_img'] and self.model.conditioning_key:  # todo check for completeness
+            # cond_stage_key用于判断约束形式，我们是txt
+            if self.cond_stage_key in ["image", "LR_image", "segmentation", 'bbox_img'] and self.model.conditioning_key:  # todo check for completeness
                 c_key = next(iter(cond.keys()))  # get key
                 c = next(iter(cond.values()))  # get value
                 assert (len(c) == 1)  # todo extend to list with more than one elem
@@ -983,8 +984,8 @@ class LatentDiffusion(DDPM):
             # stitch crops together
             x_recon = fold(o) / normalization
 
-        else:
-            x_recon = self.model(x_noisy, t, **cond)
+        else:  # 进这个分支
+            x_recon = self.model(x_noisy, t, **cond)  # 反向去噪过程
 
         if isinstance(x_recon, tuple) and not return_ids:
             return x_recon[0]

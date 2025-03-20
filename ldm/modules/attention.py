@@ -167,19 +167,30 @@ class CrossAttention(nn.Module):
             nn.Dropout(dropout)
         )
 
-    def forward(self, x, context=None, mask=None):
-        h = self.heads
+    def forward(self, x, context=None, mask=None):  # mask用不到
+        '''
+        以第一次输入为例，介绍形状变化
+        x: torch.Size([2, 4096, 320])
+        context: 自注意力是None，用x替代；交叉注意力是torch.Size([2, 77, 768])
+        mask: always None
+        q, k, v: torch.Size([2, 4096, 320]) torch.Size([2, 77, 320]) torch.Size([2, 77, 320]) 【交叉注意力
+        变换后的qkv: torch.Size([16, 4096, 40]) torch.Size([16, 77, 40]) torch.Size([16, 77, 40])  【交叉注意力
+        sim: torch.Size([16, 4096, 77]) 【交叉注意力
+        attn: torch.Size([16, 4096, 77])
+
+        '''
+        h = self.heads  # 8个head
 
         q = self.to_q(x)
-        context = default(context, x)
+        context = default(context, x)  # 没有约束就用x作为context，是自注意力
         k = self.to_k(context)
         v = self.to_v(context)
 
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))  # 指定h的值，变换qkv的形状。b批次大小，n序列长度，h头个数，d每个头的维度
 
-        sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
+        sim = einsum('b i d, b j d -> b i j', q, k) * self.scale   # 用einsum实现q*k^T
 
-        if exists(mask):
+        if exists(mask):  # 没有mask，用不到
             mask = rearrange(mask, 'b ... -> b (...)')
             max_neg_value = -torch.finfo(sim.dtype).max
             mask = repeat(mask, 'b j -> (b h) () j', h=h)
@@ -188,9 +199,9 @@ class CrossAttention(nn.Module):
         # attention, what we cannot get enough of
         attn = sim.softmax(dim=-1)
 
-        out = einsum('b i j, b j d -> b i d', attn, v)
-        out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
-        return self.to_out(out)
+        out = einsum('b i j, b j d -> b i d', attn, v)  # attention score和value运算，torch.Size([16, 4096, 40])
+        out = rearrange(out, '(b h) n d -> b n (h d)', h=h)  # 把多头拆出来，torch.Size([2, 4096, 320])
+        return self.to_out(out)  # 还原成x的维度
 
 
 class BasicTransformerBlock(nn.Module):
@@ -209,8 +220,9 @@ class BasicTransformerBlock(nn.Module):
         return checkpoint(self._forward, (x, context), self.parameters(), self.checkpoint)
 
     def _forward(self, x, context=None):
-        x = self.attn1(self.norm1(x)) + x
-        x = self.attn2(self.norm2(x), context=context) + x
+        # 所有x的形状都是torch.Size([2, 4096, 320])
+        x = self.attn1(self.norm1(x)) + x   # 没有c，变成自注意力
+        x = self.attn2(self.norm2(x), context=context) + x  # context作为cross-attention的KV，torch.Size([2, token_size, 768])，2是因为cfg加了个context，样本数变为2
         x = self.ff(self.norm3(x)) + x
         return x
 
@@ -236,7 +248,7 @@ class SpatialTransformer(nn.Module):
                                  stride=1,
                                  padding=0)
 
-        self.transformer_blocks = nn.ModuleList(
+        self.transformer_blocks = nn.ModuleList(  # transformer模块
             [BasicTransformerBlock(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim)
                 for d in range(depth)]
         )
@@ -251,11 +263,11 @@ class SpatialTransformer(nn.Module):
         # note: if no context is given, cross-attention defaults to self-attention
         b, c, h, w = x.shape
         x_in = x
-        x = self.norm(x)
-        x = self.proj_in(x)
+        x = self.norm(x)  # 
+        x = self.proj_in(x)  # 形状变换
         x = rearrange(x, 'b c h w -> b (h w) c')
         for block in self.transformer_blocks:
             x = block(x, context=context)
         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
-        x = self.proj_out(x)
+        x = self.proj_out(x)  # 形状变换
         return x + x_in
